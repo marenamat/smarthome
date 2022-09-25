@@ -118,13 +118,16 @@ int main(void)
 	    continue;
 	  }
 
-	  LOGN("got a packet");
+	  LOG("got a packet: %u %u", rp.temp, rp.hum);
+	  double temp = -45 + 175 * rp.temp / 65535.0L;
+	  double hum = rp.hum / 65535.0L;
+
 	  fprintf(csv_fp, "%s;%llu;%.2lf;%.3lf\n",
 	      inet_ntoa(from.in.sin_addr),
-	      now.tv_sec,
-	      -45 + 175 * ((double) rp.temp) / 65535.0L,
-	      ((double) rp.hum) / 65536.0L);
+	      now.tv_sec, temp, hum);
 	}
+
+	fflush(csv_fp);
 	break;
 
       default:
