@@ -4,13 +4,18 @@
 #include "user_interface.h"
 #include "driver/i2c_master.h"
 
+#include "temphum.h"
+
 static os_timer_t init_timer;
-static os_timer_t run_timer, unblink_timer;
+static os_timer_t run_timer, data_acquire_timer, unblink_timer;
+
+#define DATA_ACQUIRE_DELAY  4
 
 struct _esp_udp master_conn_udp = {
   .remote_port = 4242,
   .local_port = 4242,
-  .remote_ip = { 192, 168, 1, 160 },
+  .remote_ip = { 192, 168, 1, 1 },
+//  .remote_ip = { 46, 36, 37, 149 },
 };
 
 struct espconn master_conn = {
@@ -30,43 +35,49 @@ void unblink(void *arg)
   BLINK_SET(1);
 }
 
-static struct packet {
-  uint16_t temp;
-  uint16_t hum;
-  uint8_t temp_crc;
-  uint8_t hum_crc;
-  uint8_t status;
-  uint32_t counter;
-} packet;
-
-void try_i2c(void)
+void data_acquire(void);
+void data_request(void)
 {
-  packet.status = 0;
-  packet.temp = packet.hum = 0;
-  packet.temp_crc = packet.hum_crc = 0;
+  BLINK_SET(0);
 
 #define WB(x)  do { \
   packet.status++; \
   i2c_master_writeByte(x); \
-  if (!i2c_master_checkAck()) { i2c_master_stop(); return; } \
+  if (!i2c_master_checkAck()) { os_printf("bad request: %u\n", packet.status); i2c_master_stop(); return; } \
 } while (0)
 
   i2c_master_start();
   WB(0x88);
   WB(0x24);
   WB(0x0B);
-//  WB(0x2C);
-//  WB(0x0D);
+  //  WB(0x2C);
+  //  WB(0x0D);
+  i2c_master_stop();
+
+  os_timer_disarm(&data_acquire_timer);
+  os_timer_setfn(&data_acquire_timer, (os_timer_func_t *) data_acquire, NULL);
+  os_timer_arm(&data_acquire_timer, DATA_ACQUIRE_DELAY, 0);
+}
+
+void data_acquire(void)
+{
+  packet.status = 0;
+  packet.temp = packet.hum = 0;
+  packet.temp_crc = packet.hum_crc = 0;
 
   uint8_t msb, lsb;
+  uint16_t delay = 0;
 
-  do {
+  i2c_master_start();
+  i2c_master_writeByte(0x89);
+
+  if (!i2c_master_checkAck())
+  {
     i2c_master_stop();
-    os_printf("check\n");
-//    os_delay_us(10);
-    i2c_master_start();
-    i2c_master_writeByte(0x89);
-  } while (!i2c_master_checkAck());
+    os_printf("not ready\n");
+    os_timer_arm(&data_acquire_timer, DATA_ACQUIRE_DELAY, 0);
+    return;
+  }
 
   msb = i2c_master_readByte();
   i2c_master_send_ack();
@@ -87,18 +98,12 @@ void try_i2c(void)
   i2c_master_stop();
 
   packet.status = 0;
-}
-
-void data_send(void *arg)
-{
-  try_i2c();
   packet.counter++;
 
   os_printf("Packet: %04x %04x %02x %02x %02x cnt=%u\n",
       packet.temp, packet.hum, packet.temp_crc, packet.hum_crc, packet.status, packet.counter);
   espconn_sendto(&master_conn, (uint8_t *) &packet, sizeof(packet));
-  BLINK_SET(0);
-  os_timer_arm(&unblink_timer, 200, 1);
+  os_timer_arm(&unblink_timer, 200, 0);
 }
 
 uint8_t data_init(void)
@@ -112,8 +117,8 @@ uint8_t data_init(void)
   os_timer_setfn(&unblink_timer, (os_timer_func_t *) unblink, NULL);
 
   os_timer_disarm(&run_timer);
-  os_timer_setfn(&run_timer, (os_timer_func_t *) data_send, NULL);
-  os_timer_arm(&run_timer, 8000, 1);
+  os_timer_setfn(&run_timer, (os_timer_func_t *) data_request, NULL);
+  os_timer_arm(&run_timer, 5000, 1);
   return STATUS_OK;
 }
 
