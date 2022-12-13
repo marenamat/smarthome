@@ -23,7 +23,7 @@ struct upstream {
   }, {
     .udp = {
       .remote_port = 4242,
-      .local_port = 4242,
+      .local_port = 4243,
       .remote_ip = { 46, 36, 37, 149 },
     },
   },
@@ -42,13 +42,13 @@ static uint8_t status = STATUS_NOMAC;
 static uint8_t blink_request = STATUS_NOMAC;
 static uint8_t blink_hold = 0;
 
-#define BLINK_SET(n)  GPIO_OUTPUT_SET(2, (n))
+#define BLINK_SET(n)  GPIO_OUTPUT_SET(2, !(n))
 
 void data_acquire(void);
 void data_request(void)
 {
   blink_hold = 1;
-  BLINK_SET(0);
+  BLINK_SET(1);
 
 #define WB(x)  do { \
   packet.status++; \
@@ -148,8 +148,11 @@ static void mainloop(void *_)
       {
 	connections[i].conn.type = ESPCONN_UDP;
 	connections[i].conn.proto.udp = &connections[i].udp;
-	espconn_create(&connections[i].conn);
+	int res = espconn_create(&connections[i].conn);
+	os_printf("Connected to [%d]: %d\n", i, res);
       }
+
+      status = STATUS_OK;
 
       /* fall through */
     
@@ -162,6 +165,7 @@ static void mainloop(void *_)
       }
 
       data_request();
+      break;
 
     default:
       os_printf("BAD! status %d\n", status);
@@ -181,17 +185,23 @@ void blinker(void *_)
     case 0: break;
     case 1: return;
     case 2: blink_hold = 0;
-	    BLINK_SET(1);
+	    BLINK_SET(0);
 	    return;
   }
 
   if (!blink_status)
     if (blink_request)
+    {
       blink_status = blink_request * 2;
+      blink_request = 0;
+    }
     else
       return;
   
-  BLINK_SET(blink_status-- & 1);
+  blink_status--;
+
+  os_printf("blinker, status %d\n", blink_status);
+  BLINK_SET(blink_status & 1);
 }
 
 void ICACHE_FLASH_ATTR user_init(void)
