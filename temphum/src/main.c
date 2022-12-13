@@ -6,38 +6,48 @@
 
 #include "temphum.h"
 
-static os_timer_t init_timer;
-static os_timer_t run_timer, data_acquire_timer, unblink_timer;
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
-#define DATA_ACQUIRE_DELAY  4
+static os_timer_t blink_timer, mainloop_timer, data_acquire_timer;
 
-struct _esp_udp master_conn_udp = {
-  .remote_port = 4242,
-  .local_port = 4242,
-  .remote_ip = { 192, 168, 1, 1 },
-//  .remote_ip = { 46, 36, 37, 149 },
+struct upstream {
+  struct _esp_udp udp;
+  struct espconn conn;
+} connections[] = {
+  {
+    .udp = {
+      .remote_port = 4242,
+      .local_port = 4242,
+      .remote_ip = { 192, 168, 1, 1 },
+    },
+  }, {
+    .udp = {
+      .remote_port = 4242,
+      .local_port = 4242,
+      .remote_ip = { 46, 36, 37, 149 },
+    },
+  },
 };
 
-struct espconn master_conn = {
-  .type = ESPCONN_UDP,
-  .proto.udp = &master_conn_udp,
-};
+uint8_t local_mac[6];
 
-#define STATUS_INIT   2
+#define DATA_ACQUIRE_DELAY  3
+
 #define STATUS_OK     1
-#define STATUS_BAD    3
+#define STATUS_NOUDP  2
+#define STATUS_NOWIFI 3
+#define STATUS_NOMAC  4
 
-static uint8_t status = STATUS_INIT;
+static uint8_t status = STATUS_NOMAC;
+static uint8_t blink_request = STATUS_NOMAC;
+static uint8_t blink_hold = 0;
+
 #define BLINK_SET(n)  GPIO_OUTPUT_SET(2, (n))
-
-void unblink(void *arg)
-{
-  BLINK_SET(1);
-}
 
 void data_acquire(void);
 void data_request(void)
 {
+  blink_hold = 1;
   BLINK_SET(0);
 
 #define WB(x)  do { \
@@ -62,8 +72,10 @@ void data_request(void)
 void data_acquire(void)
 {
   packet.status = 0;
+  packet.version = PACKET_VERSION;
   packet.temp = packet.hum = 0;
   packet.temp_crc = packet.hum_crc = 0;
+  memcpy(packet.mac, local_mac, sizeof(local_mac));
 
   uint8_t msb, lsb;
   uint16_t delay = 0;
@@ -102,67 +114,109 @@ void data_acquire(void)
 
   os_printf("Packet: %04x %04x %02x %02x %02x cnt=%u\n",
       packet.temp, packet.hum, packet.temp_crc, packet.hum_crc, packet.status, packet.counter);
-  espconn_sendto(&master_conn, (uint8_t *) &packet, sizeof(packet));
-  os_timer_arm(&unblink_timer, 200, 0);
+  for (int i=0; i<ARRAY_SIZE(connections); i++)
+    espconn_sendto(&connections[i].conn, (uint8_t *) &packet, sizeof(packet));
+
+  blink_hold = 2;
 }
 
-uint8_t data_init(void)
+static void reset_wifi(void)
 {
-  if (espconn_create(&master_conn))
-    return STATUS_BAD;
-
-  os_timer_disarm(&init_timer);
-
-  os_timer_disarm(&unblink_timer);
-  os_timer_setfn(&unblink_timer, (os_timer_func_t *) unblink, NULL);
-
-  os_timer_disarm(&run_timer);
-  os_timer_setfn(&run_timer, (os_timer_func_t *) data_request, NULL);
-  os_timer_arm(&run_timer, 5000, 1);
-  return STATUS_OK;
+  wifi_set_opmode(STATION_MODE);
+  struct station_config wifi_conf = {
+    .ssid = "ucw",
+    .password = "NeniDobrAniZel",
+  };
+  wifi_station_set_config(&wifi_conf);
 }
 
-void status_blink(void *arg)
+static void mainloop(void *_)
 {
-  static uint8_t cur = 0;
+  switch (status) {
+    case STATUS_NOMAC:
+      if (!wifi_get_macaddr(STATION_IF, local_mac))
+	break;
+      status = STATUS_NOWIFI;
+      reset_wifi();
+      /* fall through */
 
-  if (cur < status * 2)
-    BLINK_SET(cur & 1);
+    case STATUS_NOWIFI:
+      if (wifi_station_get_connect_status() != 5)
+	break;
 
-  if (wifi_station_get_connect_status() == 5)
-  {
-    status = data_init();
-    if (status == STATUS_OK)
-    {
-      cur = 0;
-      return;
-    }
+      for (int i=0; i<ARRAY_SIZE(connections); i++)
+      {
+	connections[i].conn.type = ESPCONN_UDP;
+	connections[i].conn.proto.udp = &connections[i].udp;
+	espconn_create(&connections[i].conn);
+      }
+
+      /* fall through */
+    
+    case STATUS_OK:
+      if (wifi_station_get_connect_status() != 5)
+      {
+	reset_wifi();
+	status = STATUS_NOWIFI;
+	break;
+      }
+
+      data_request();
+
+    default:
+      os_printf("BAD! status %d\n", status);
+      status = STATUS_NOMAC;
+      break;
   }
+
+  blink_request = status;
+}
+
+void blinker(void *_)
+{
+  static uint8_t blink_status = 0;
+
+  switch (blink_hold)
+  {
+    case 0: break;
+    case 1: return;
+    case 2: blink_hold = 0;
+	    BLINK_SET(1);
+	    return;
+  }
+
+  if (!blink_status)
+    if (blink_request)
+      blink_status = blink_request * 2;
+    else
+      return;
   
-  cur++;
-  cur %= 10;
+  BLINK_SET(blink_status-- & 1);
 }
 
 void ICACHE_FLASH_ATTR user_init(void)
 {
-    gpio_init();
+  /* Setup GPIO */
+  gpio_init();
+  i2c_master_gpio_init();
+  i2c_master_init();
 
-    uart_init(115200, 115200);
-    os_printf("SDK version:%s\n", system_get_sdk_version());
+  /* Setup debug */
+  uart_init(115200, 115200);
+  os_printf("SDK version:%s\n", system_get_sdk_version());
 
-    PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_GPIO2);
+  /* Setup blinker */
+  PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_GPIO2);
 
-    wifi_set_opmode(STATION_MODE);
-    struct station_config wifi_conf = {
-      .ssid = "ucw",
-      .password = "NeniDobrAniZel",
-    };
-    wifi_station_set_config(&wifi_conf);
+  os_timer_disarm(&blink_timer);
+  os_timer_setfn(&blink_timer, (os_timer_func_t *) blinker, NULL);
+  os_timer_arm(&blink_timer, 100, 1);
 
-    i2c_master_gpio_init();
-    i2c_master_init();
+  /* Setup mainloop */
+  os_timer_disarm(&mainloop_timer);
+  os_timer_setfn(&mainloop_timer, (os_timer_func_t *) mainloop, NULL);
+  os_timer_arm(&mainloop_timer, 5000, 1);
 
-    os_timer_disarm(&init_timer);
-    os_timer_setfn(&init_timer, (os_timer_func_t *)status_blink, NULL);
-    os_timer_arm(&init_timer, 100, 1);
+  /* Run mainloop also now */
+  mainloop(NULL);
 }

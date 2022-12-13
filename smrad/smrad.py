@@ -12,15 +12,17 @@ sock.bind((UDP_IP, UDP_PORT))
 while True:
     data, addr = sock.recvfrom(1024) # buffer size is 1024 bytes
     u = dict(zip([
+        "version",
         "temp",
         "hum",
-        "tcrc",
-        "hcrc",
+        "mac",
+        "temp_crc",
+        "hum_crc",
         "status",
-        "ident",
+        "_u0",
         "counter",
         ],
-        struct.unpack("HHBBBBI", data)))
+        struct.unpack("HHH6sBBBBI", data)))
     u["now"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     u["humR"] = u["hum"] / 65535.0
     u["tempC"] = -45 + 175 * u["temp"] / 65535.0
