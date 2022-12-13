@@ -26,4 +26,5 @@ while True:
     u["now"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     u["humR"] = u["hum"] / 65535.0
     u["tempC"] = -45 + 175 * u["temp"] / 65535.0
+    u["macH"] = ":".join([ f"{x:0X}" for x in u["mac"] ])
     print(f"received message: {data} interpreted as {u}")
